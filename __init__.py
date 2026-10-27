@@ -3,7 +3,11 @@
 from binaryninja import *
 from binaryninja.plugin import *
 from binaryninja.interaction import *
+from binaryninja.mainthread import execute_on_main_thread_and_wait
 import networkx as nx
+
+if core_ui_enabled():
+    from . import sidebar
 
 Settings().register_group("callgraph", "Callgraph")
 Settings().register_setting("callgraph.limit", """
@@ -51,40 +55,14 @@ def get_function_name(view, address):
     function = view.get_function_at(address)
     return f"{function.name}@{hex(address)}" if function else hex(address)
 
-# stolen from Ariadne
-def render_flowgraph(bv: BinaryView, g: nx.DiGraph, title: str=''):
-    """Render arbitrary networkx graph"""
-    flowgraph = FlowGraph()
-    flowgraph_nodes: Dict[Function, FlowGraphNode] = {}
+def show_tree(g: nx.DiGraph, start_function: Function, target_function: Function):
+    if not core_ui_enabled():
+        log.log(LogLevel.ErrorLog, "Showing call trees requires the Binary Ninja UI")
+        return
+    execute_on_main_thread_and_wait(
+        lambda: sidebar.show_graph(g, start_function, target_function, ALLEYCAT_LIMIT))
 
-    # encapsulate check/add with a helper func for clarity
-    def add_node(node_func: Function):
-        if node_func not in flowgraph_nodes:
-            new_node = FlowGraphNode(flowgraph)
-            # h/t @joshwatson on how to distinguish imports, your implementation was better
-            if node_func.symbol.type == SymbolType.ImportedFunctionSymbol:
-                token_type = InstructionTextTokenType.ImportToken
-            else:
-                token_type = InstructionTextTokenType.CodeSymbolToken
-            cur_func_name = get_function_name(bv, node_func)
-            func_token = InstructionTextToken(token_type, cur_func_name, node_func.start)
-            new_node.lines = [DisassemblyTextLine([func_token])]
-
-            flowgraph.append(new_node)
-            flowgraph_nodes[node_func] = new_node
-            return new_node
-        return flowgraph_nodes[node_func]
-
-    # one traversal that adds islands and nodes with edges
-    for node_func in g.nodes:
-        src_flowgraph_node = add_node(node_func)
-        for src, dst in g.out_edges(node_func):
-            dst_flowgraph_node = add_node(dst)
-            src_flowgraph_node.add_outgoing_edge(BranchType.CallDestination, dst_flowgraph_node)
-
-    bv.show_graph_report(title, flowgraph)
-
-def do(bv, start_function, target_function, blacklisted = [], textmode = True, drawmode = False, savemode = False):
+def do(bv, start_function, target_function, blacklisted = [], textmode = True, drawmode = False):
     # Build the call graph
     call_graph = nx.DiGraph()
     visited = set()
@@ -101,25 +79,16 @@ def do(bv, start_function, target_function, blacklisted = [], textmode = True, d
                 report += " -> ".join(function_names)
                 report += "\n\n"
             bv.show_plain_text_report(f"Paths found between {start_function.name} and {target_function.name}",report)
-        if drawmode or savemode:
+        if drawmode:
             nodes_between_set = {node for path in paths for node in path}
-            sg = call_graph.subgraph(nodes_between_set)
-            if drawmode:
-                if sg.number_of_nodes() > ALLEYCAT_LIMIT:
-                    if show_message_box(f"Graph contains large number of nodes:{sg.number_of_nodes()}, do you want to show it?", \
-                                           MessageBoxButtonSet.YesNoButtonSet, \
-                                           MessageBoxIcon.QuestionIcon) == \
-                                           MessageBoxButtonResult.NoButton:
-                        return
-                render_flowgraph(bv, sg, f"{start_function.name} -> {target_function.name}")
-            if savemode:
-                # ask file
-                file_name = get_save_filename_input("File name to save","graphml","graph.graphml")
-                if file_name is None:
+            sg = call_graph.subgraph(nodes_between_set).copy()
+            if sg.number_of_nodes() > ALLEYCAT_LIMIT:
+                if show_message_box(f"Graph contains large number of nodes:{sg.number_of_nodes()}, do you want to show it?", \
+                                       MessageBoxButtonSet.YesNoButtonSet, \
+                                       MessageBoxIcon.QuestionIcon) == \
+                                       MessageBoxButtonResult.NoButton:
                     return
-                nx.write_graphml_lxml(sg,file_name)
-            del sg
-            del call_graph
+            show_tree(sg, start_function, target_function)
             log.log(LogLevel.InfoLog, "Graph drawing done")
     else:
         print(f"No paths found between {start_function.name} and {target_function.name}.")
@@ -127,7 +96,7 @@ def do(bv, start_function, target_function, blacklisted = [], textmode = True, d
 def get_blacklisted_functions():
     return list()
 
-def ask_both(bv, textmode, drawmode, savemode):
+def ask_both(bv, textmode, drawmode):
     addr_from = bv.get_address_input("Choose source function", "Source function")
     if addr_from is None:
         log.log(LogLevel.ErrorLog, "No source function provided")
@@ -145,9 +114,9 @@ def ask_both(bv, textmode, drawmode, savemode):
         log.log(LogLevel.ErrorLog, "Target function doesn't exitsts!")
         return
     do(bv, start_function, target_function, get_blacklisted_functions(),\
-       textmode, drawmode, savemode )
+       textmode, drawmode)
 
-def ask_target(bv, function, textmode, drawmode, savemode):
+def ask_target(bv, function, textmode, drawmode):
     start_function = function
     if not start_function:
         log.log(LogLevel.ErrorLog, "Start function doesn't exists!")
@@ -161,9 +130,9 @@ def ask_target(bv, function, textmode, drawmode, savemode):
         log.log(LogLevel.ErrorLog, "Target function doesn't exitsts!")
         return
     do(bv, start_function, target_function, get_blacklisted_functions(),\
-       textmode, drawmode, savemode )
+       textmode, drawmode)
 
-def ask_source(bv, function, textmode, drawmode, savemode):
+def ask_source(bv, function, textmode, drawmode):
     addr_from = bv.get_address_input("Choose source function", "Source function")
     if addr_from is None:
         log.log(LogLevel.ErrorLog, "No source function provided")
@@ -177,34 +146,25 @@ def ask_source(bv, function, textmode, drawmode, savemode):
         log.log(LogLevel.ErrorLog, "Target function doesn't exitsts!")
         return
     do(bv, start_function, target_function, get_blacklisted_functions(),\
-       textmode, drawmode, savemode )
+       textmode, drawmode)
 
 def generate_text_paths_ask(bv):
-    ask_both(bv, True, False, False)
+    ask_both(bv, True, False)
 
 def generate_text_paths_from_this(bv, function):
-    ask_target(bv, function, True, False, False)
+    ask_target(bv, function, True, False)
 
 def generate_text_paths_to_this(bv, function):
-    ask_source(bv, function, True, False, False)
+    ask_source(bv, function, True, False)
 
 def draw_paths_ask(bv):
-    ask_both(bv, False, True, False)
+    ask_both(bv, False, True)
 
 def draw_paths_from_this(bv, function):
-    ask_target(bv, function, False, True, False)
+    ask_target(bv, function, False, True)
 
 def draw_paths_to_this(bv, function):
-    ask_source(bv, function, False, True, False)
-
-def save_gml_paths_ask(bv):
-    ask_both(bv, False, False, True)
-
-def save_gml_paths_to_this(bv, function):
-    ask_source(bv, function, False, False, True)
-
-def save_gml_paths_from_this(bv, function):
-    ask_target(bv, function, False, False, True)
+    ask_source(bv, function, False, True)
 
 PluginCommand.register("Graphs\\Generate paths between two functions",\
                        "Generate all paths between two functions in text format",\
@@ -216,21 +176,12 @@ PluginCommand.register_for_function("Graphs\\Generate paths from other function 
                                     "Generate all paths from other function to currently selected function",\
                                     generate_text_paths_to_this)
 PluginCommand.register("Graphs\\Draw paths between two functions",\
-                       "Show all paths between two functions",\
+                       "Show all paths between two functions as a tree in the Callgraph sidebar",\
                        draw_paths_ask)
 PluginCommand.register_for_function("Graphs\\Draw paths from this to other function",\
-                                    "Show all paths from currently selected function to other function",\
+                                    "Show all paths from currently selected function to other function as a tree in the Callgraph sidebar",\
                                     draw_paths_from_this)
 PluginCommand.register_for_function("Graphs\\Draw paths from other function to this",\
-                                    "Show all paths from other function to currently selected function",\
+                                    "Show all paths from other function to currently selected function as a tree in the Callgraph sidebar",\
                                     draw_paths_to_this)
-PluginCommand.register("Graphs\\Save Graphml with paths between two functions",\
-                       "Save graph with all paths in GraphML format",\
-                       save_gml_paths_ask)
-PluginCommand.register_for_function("Graphs\\Save Graphml with paths from this function to other function",\
-                                    "Save graph in GraphML format with all paths from currently selected function to other function",\
-                                    save_gml_paths_from_this)
-PluginCommand.register_for_function("Graphs\\Save Graphml with paths from other function to this function",\
-                                    "Save graph in GraphML format with all paths from other function to currently selected function",\
-                                    save_gml_paths_to_this)
 
