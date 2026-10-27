@@ -148,6 +148,49 @@ class SearchTest(unittest.TestCase):
         self.assertEqual(consumed, 26)
         self.assertIn("max_references_per_function", result.stats.truncation_reasons)
 
+    def test_dead_end_subtree_does_not_exhaust_budget(self):
+        source = Function("source", 0x10000)
+        decoy = Function("decoy", 0x11000)
+        source.calls(decoy)
+        previous = decoy
+        for index in range(50):
+            function = Function(f"decoy_{index}", 0x12000 + index)
+            previous.calls(function)
+            previous = function
+        middle = Function("middle", 0x13000)
+        source.calls(middle)
+        middle.calls(self.sink)
+        result = find_paths_between(
+            source, self.sink, set(), SearchLimits(100, 20, 10, 100, 100)
+        )
+        self.assertEqual(result.paths, [[source, middle, self.sink]])
+        self.assertFalse(result.stats.truncated)
+
+    def test_depth_pruning_reports_truncation(self):
+        result = find_paths_between(
+            self.entry, self.sink, set(), SearchLimits(100, 1, 100, 100, 100)
+        )
+        self.assertEqual(result.paths, [])
+        self.assertIn("max_depth", result.stats.truncation_reasons)
+
+    def test_callback_reference_edges_are_reported(self):
+        registrar = Function("registrar", 0x6000)
+        self.entry.calls(registrar)
+        callback = Function("callback", 0x7000)
+        callback.calls(self.sink)
+        view = View(
+            entry_functions=[self.entry],
+            code_refs={
+                callback.start: [types.SimpleNamespace(address=0x6010, function=registrar)]
+            },
+        )
+        result = find_paths_from_roots(view, self.sink, (1, 2), self.limits)
+        self.assertEqual(result.reference_edges, {(0x6000, 0x7000)})
+        self.assertIn(
+            ("ENTRY", [self.entry, registrar, callback, self.sink]),
+            result.paths,
+        )
+
     def test_root_depth_boundary_is_explicit(self):
         view = View(entry_functions=[self.entry])
         result = find_paths_from_roots(

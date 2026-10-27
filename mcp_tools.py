@@ -5,7 +5,7 @@ from typing import Annotated
 from binaryninja import Settings, core_ui_enabled, mcp
 import networkx as nx
 
-from . import build_path_graph, find_root_paths, render_flowgraph
+from . import build_path_graph, find_root_paths, root_starts, show_tree
 from .search import SearchCancelled, SearchLimits, find_paths_between
 
 
@@ -112,7 +112,8 @@ def between_paths(
         "path_count": len(outcome.paths),
         **_stats(outcome.stats, limits),
     }
-    return bv, build_path_graph(outcome.paths), result
+    tree = ([(start, None)], end, f"{start.name} -> {end.name}")
+    return bv, build_path_graph(outcome.paths), result, tree
 
 
 def root_paths(
@@ -146,16 +147,27 @@ def root_paths(
         "path_count": len(outcome.paths),
         **_stats(outcome.stats, limits),
     }
-    return bv, build_path_graph(path for _, path in outcome.paths), result
+    tree = (root_starts(outcome.paths), sink, f"Discovered roots -> {sink.name}")
+    return bv, build_path_graph(
+        (path for _, path in outcome.paths), outcome.reference_edges
+    ), result, tree
 
 
-def draw_result(bv, graph, result):
+def _check_drawable(graph):
     if not core_ui_enabled():
         raise mcp.ToolError("ui_required", "Drawing call paths requires the Binary Ninja UI.")
     limit = Settings().get_integer("callgraph.limit")
     if graph.number_of_nodes() > limit:
         raise mcp.ToolError("graph_too_large", f"Graph exceeds the configured {limit} node limit.")
-    render_flowgraph(bv, graph, "Callgraph MCP paths")
+
+
+def draw_result(bv, graph, result, tree):
+    _check_drawable(graph)
+    if graph.number_of_nodes() == 0:
+        return {**result, "drawn": False}
+    starts, target, title = tree
+    if not show_tree(bv, graph, starts, target, title):
+        raise mcp.ToolError("sidebar_unavailable", "Could not show the Callgraph sidebar.")
     return {**result, "drawn": True}
 
 
@@ -166,7 +178,8 @@ def graphml_result(graph, result):
         for function in graph.nodes
     )
     serializable.add_edges_from(
-        (hex(source.start), hex(target.start)) for source, target in graph.edges
+        (hex(source.start), hex(target.start), {"reference": reference})
+        for source, target, reference in graph.edges(data="reference", default=False)
     )
     return {**result, "graphml": "\n".join(nx.generate_graphml(serializable))}
 
@@ -330,7 +343,7 @@ def register_tools():
         :param max_edges: Maximum callee edges examined across the search.
         :param max_references_per_function: Maximum callees followed from one function.
         """
-        _, graph, result = between_paths(
+        _, graph, result, _ = between_paths(
             call,
             source,
             target,
@@ -362,7 +375,7 @@ def register_tools():
         :param max_edges: Maximum caller/reference edges examined across the search.
         :param max_references_per_function: Maximum callers or references followed per function.
         """
-        _, graph, result = root_paths(
+        _, graph, result, _ = root_paths(
             call,
             target,
             max_paths,

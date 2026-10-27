@@ -3,7 +3,7 @@
 Another call graph plugin.
 Allows to print/draw graphs with paths between two selected functions (usually: one which processes some insecure input and some insecure sink)
 
-"Draw" commands show the paths as a tree in the **Callgraph** sidebar. Each query is added as a separate top-level entry; double-click a function to navigate to it. Use "Expand all" on a selected node, "Remove" to drop a query, and "Clear" to reset the tree.
+"Draw" commands, including the MCP draw tools, show the paths as a tree in the **Callgraph** sidebar. Discovered-root queries list each root function under the query entry, labelled with its root kind. Functions reached through a code reference rather than a direct call (typically a registered callback) are shown in italics with a `[ref]` tag; GraphML exports carry the same flag as the `reference` edge attribute. Each query is added as a separate top-level entry; the Address column shows where the parent calls or references the function (`(+N)` when there are several sites, all listed in the tooltip), while start functions show their own address. Double-click the Function column to navigate to the function, or the Address column to navigate to the call/reference site. Use "Expand all" on a selected node, "Remove" to drop a query, and "Clear" to reset the tree.
 
 The plugin also exposes six tools through Binary Ninja's native MCP server:
 
@@ -27,6 +27,11 @@ tool argument (`max_paths`, `max_depth`, `max_states`, `max_edges`, and
 `max_references_per_function`). Results include the effective limits, work
 counters, `truncated`, and `truncation_reasons`; a truncated empty result is not
 evidence that no path exists.
+
+Between-function searches first walk callers backward from the target (under
+the same limits) and only follow callees that can still reach it within
+`max_depth`, so dead-end subtrees do not consume the search budget. If that
+backward walk hits a limit, the search runs unpruned.
 
 The same defaults are available in **Settings > Callgraph** for UI searches.
 These limits prevent a high-fan-in sink such as `memcpy` in a large binary from

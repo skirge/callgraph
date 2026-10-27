@@ -30,11 +30,14 @@ def load_adapter():
     sys.modules[f"{package_name}.search"] = search
     search_spec.loader.exec_module(search)
 
-    def build_path_graph(paths):
+    def build_path_graph(paths, reference_edges=frozenset()):
         graph = nx.DiGraph()
         for path in paths:
             graph.add_nodes_from(path)
-            graph.add_edges_from(zip(path, path[1:]))
+            for caller, callee in zip(path, path[1:]):
+                graph.add_edge(
+                    caller, callee, reference=(caller.start, callee.start) in reference_edges
+                )
         return graph
 
     def find_root_paths(view, sink, limits, is_cancelled):
@@ -42,7 +45,8 @@ def load_adapter():
 
     package.build_path_graph = build_path_graph
     package.find_root_paths = find_root_paths
-    package.render_flowgraph = Mock()
+    package.show_tree = Mock(return_value=True)
+    package.root_starts = Mock(return_value=[])
 
     registry = {}
     mcp = types.ModuleType("binaryninja.mcp")

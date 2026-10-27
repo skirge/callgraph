@@ -114,11 +114,14 @@ def get_search_limits(max_depth=None, max_paths=None):
     )
 
 
-def build_path_graph(paths):
+def build_path_graph(paths, reference_edges=frozenset()):
     graph = nx.DiGraph()
     for path in paths:
         graph.add_nodes_from(path)
-        graph.add_edges_from(pairwise(path))
+        for caller, callee in pairwise(path):
+            graph.add_edge(
+                caller, callee, reference=(caller.start, callee.start) in reference_edges
+            )
     return graph
 
 
@@ -134,12 +137,24 @@ def get_function_name(view, address):
     function = view.get_function_at(address)
     return f"{function.name}@{hex(address)}" if function else hex(address)
 
-def show_tree(g: nx.DiGraph, start_function: Function, target_function: Function):
+def show_tree(bv, g: nx.DiGraph, starts, target_function: Function, title: str):
     if not core_ui_enabled():
         log.log(LogLevel.ErrorLog, "Showing call trees requires the Binary Ninja UI")
-        return
+        return False
+    shown = []
     execute_on_main_thread_and_wait(
-        lambda: sidebar.show_graph(g, start_function, target_function, ALLEYCAT_LIMIT))
+        lambda: shown.append(
+            sidebar.show_graph(bv, g, starts, target_function, ALLEYCAT_LIMIT, title)))
+    return bool(shown and shown[0])
+
+
+def root_starts(paths):
+    kinds = {}
+    for root_kind, path in paths:
+        kinds.setdefault(path[0], [])
+        if root_kind not in kinds[path[0]]:
+            kinds[path[0]].append(root_kind)
+    return [(function, ", ".join(labels)) for function, labels in kinds.items()]
 
 def do(bv, start_function, target_function, blacklisted=None, textmode=True, drawmode=False):
     result = find_paths_between(
@@ -174,7 +189,13 @@ def do(bv, start_function, target_function, blacklisted=None, textmode=True, dra
                     == MessageBoxButtonResult.NoButton
                 ):
                     return
-            show_tree(sg, start_function, target_function)
+            show_tree(
+                bv,
+                sg,
+                [(start_function, None)],
+                target_function,
+                f"{start_function.name} -> {target_function.name}",
+            )
             log.log(LogLevel.InfoLog, "Graph drawing done")
     else:
         print(f"No paths found between {start_function.name} and {target_function.name}.")
@@ -222,7 +243,7 @@ def generate_paths_from_roots(bv, function):
 
 def draw_paths_from_roots(bv, function):
     result = find_root_paths(bv, function)
-    graph = build_path_graph(path for _, path in result.paths)
+    graph = build_path_graph((path for _, path in result.paths), result.reference_edges)
     if graph.number_of_nodes() > ALLEYCAT_LIMIT:
         if show_message_box(
             f"Graph contains large number of nodes:{graph.number_of_nodes()}, do you want to show it?",
@@ -230,35 +251,15 @@ def draw_paths_from_roots(bv, function):
             MessageBoxIcon.QuestionIcon,
         ) == MessageBoxButtonResult.NoButton:
             return
-    render_flowgraph(bv, graph, f"Discovered roots -> {function.name}")
+    if not result.paths:
+        log.log_info(f"Callgraph: no paths found from discovered roots to {function.name}")
+        return
+    show_tree(
+        bv, graph, root_starts(result.paths), function, f"Discovered roots -> {function.name}"
+    )
+    if result.stats.truncated:
+        log.log_warn(f"Callgraph: {search_warning(result.stats)}")
 
-
-def render_flowgraph(bv, graph, title=""):
-    def show():
-        flowgraph = FlowGraph()
-        nodes = {}
-
-        def add_node(function):
-            if function not in nodes:
-                node = FlowGraphNode(flowgraph)
-                token_type = (
-                    InstructionTextTokenType.ImportToken
-                    if function.symbol.type == SymbolType.ImportedFunctionSymbol
-                    else InstructionTextTokenType.CodeSymbolToken
-                )
-                token = InstructionTextToken(token_type, function.name, function.start)
-                node.lines = [DisassemblyTextLine([token])]
-                flowgraph.append(node)
-                nodes[function] = node
-            return nodes[function]
-
-        for function in graph.nodes:
-            source_node = add_node(function)
-            for _, target in graph.out_edges(function):
-                source_node.add_outgoing_edge(BranchType.CallDestination, add_node(target))
-        bv.show_graph_report(title, flowgraph)
-
-    execute_on_main_thread_and_wait(show)
 
 def get_blacklisted_functions():
     return list()
@@ -370,7 +371,7 @@ PluginCommand.register_for_function(
 )
 PluginCommand.register_for_function(
     "Graphs\\Draw paths from discovered roots to this",
-    "Draw bounded caller paths from discovered roots to this function",
+    "Show bounded caller paths from discovered roots in the Callgraph sidebar",
     draw_paths_from_roots,
 )
 

@@ -52,6 +52,7 @@ class PathSearchResult:
 class RootPathSearchResult:
     paths: list
     stats: SearchStats
+    reference_edges: set[tuple[int, int]] = field(default_factory=set)
 
 
 def _bounded_unique_functions(functions: Iterable, limit: int):
@@ -91,6 +92,40 @@ def _check_cancelled(is_cancelled: Callable[[], bool] | None):
         raise SearchCancelled
 
 
+def _distances_to_target(target, limits, is_cancelled):
+    """Map function start -> caller hops to target; None when a limit left the map incomplete."""
+    distances = {target.start: 0}
+    frontier = [target]
+    states = edges = 0
+    depth_cut = False
+    while frontier:
+        next_frontier = []
+        for function in frontier:
+            _check_cancelled(is_cancelled)
+            states += 1
+            if states > limits.max_states:
+                return None, False
+            callers, limited = _bounded_unique_functions(
+                _callers(function), limits.max_references_per_function
+            )
+            if limited:
+                return None, False
+            distance = distances[function.start]
+            for caller in callers:
+                edges += 1
+                if edges > limits.max_edges:
+                    return None, False
+                if caller.start in distances:
+                    continue
+                if distance >= limits.max_depth:
+                    depth_cut = True
+                    continue
+                distances[caller.start] = distance + 1
+                next_frontier.append(caller)
+        frontier = next_frontier
+    return distances, depth_cut
+
+
 def find_paths_between(
     source,
     target,
@@ -102,6 +137,14 @@ def find_paths_between(
     stats = SearchStats(unique_functions={source.start})
     paths = []
     pending = [(source, [source], {source.start})]
+
+    # Without pruning, depth-first search can spend its whole budget in a callee
+    # subtree that never reaches the target.
+    distances, depth_cut = _distances_to_target(target, limits, is_cancelled)
+    if depth_cut:
+        stats.truncation_reasons.add("max_depth")
+    if distances is not None and source.start not in distances:
+        return PathSearchResult([], stats)
 
     while pending:
         _check_cancelled(is_cancelled)
@@ -138,6 +181,13 @@ def find_paths_between(
             stats.unique_functions.add(callee.start)
             if callee.name in blacklisted or callee.start in visited:
                 continue
+            if distances is not None:
+                remaining = distances.get(callee.start)
+                if remaining is None:
+                    continue
+                if len(path) + remaining > limits.max_depth:
+                    stats.truncation_reasons.add("max_depth")
+                    continue
             successors.append(callee)
         if "max_edges" in stats.truncation_reasons:
             break
@@ -245,6 +295,7 @@ def find_paths_from_roots(
     """Walk callers toward roots with explicit bounds on every branching dimension."""
     entry_points = {function.start for function in bv.entry_functions}
     unique_paths = {}
+    reference_edges = set()
     pending = [(sink, [sink], {sink.start})]
     stats = SearchStats(unique_functions={sink.start})
 
@@ -282,6 +333,7 @@ def find_paths_from_roots(
         if not callers:
             callers = _callback_callers(bv, function, stats, limits)
             for caller in callers:
+                reference_edges.add((caller.start, function.start))
                 _add_root_path(unique_paths, "CALLBACK", [caller, *path])
 
         if "max_edges" in stats.truncation_reasons:
@@ -317,4 +369,4 @@ def find_paths_from_roots(
     paths = list(unique_paths.values())
     if len(paths) > limits.max_paths:
         stats.truncation_reasons.add("max_paths")
-    return RootPathSearchResult(paths[: limits.max_paths], stats)
+    return RootPathSearchResult(paths[: limits.max_paths], stats, reference_edges)
